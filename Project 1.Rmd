@@ -1,0 +1,782 @@
+---
+title: "Project 1"
+author: "Kent Codding"
+date: "2025-02-19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1) Specify two different Bayesian models for each biomarker expression 
+
+(two different models for CHD8, two different models for DNAJC6, for a total of four). Proceed by modeling conditional distributions for the biomarkers given the outcome, as done in class. Options include many of the distributions in Table 6.2 (pg. 34) of manualjags.pdf. combined with variable transformations of your choice. You are not constrained to using the same distribution for cases and controls. You may play with the choice of prior as well. Using visualizations of your choice, discuss the relative strengths and limitations of your two models for each expression.
+
+```{r, message = F, tidy=TRUE, tidy.opts=list(width.cutoff=90)}
+# install.packages("knitr") # if not installed, run this line for knitr installation.
+library(knitr)
+library(curatedOvarianData)
+library(pROC)
+
+# packages for Bayes modeling
+library(rjags) 
+#library(R2jags)
+library(pracma)
+library(coda)
+library(jagsUI)
+
+data(GSE32063_eset)
+# Refer to Section 1 material
+```
+
+## CHD8
+
+```{r}
+XX = as.matrix(cbind(exprs(GSE32063_eset)))
+YY = 1 * as.vector(pData(GSE32063_eset)[,"debulking"]=="suboptimal")
+XX = XX[,!is.na(YY)]
+YY = YY[!is.na(YY)]
+
+chd.neg <- exprs(GSE32063_eset)["CHD8",][which(YY == 0)]
+chd.pos <- exprs(GSE32063_eset)["CHD8",][which(YY == 1)]
+```
+
+### plot empirical density curves to determine prior
+
+```{r}
+plot(density(chd.neg), xlab = "Log CHD8 Expression", col = 4, lwd = 2,
+     main = "Empirical Density Curves of CHD8 Positive and Negative Cases",
+     ylim = c(0, 0.8))
+rug(chd.neg,ticksize = .15,lwd=2, col = "blue")
+lines(density(chd.pos),xlab="Log CHD8 Expression",col=3,lwd=2,main="")
+rug(chd.pos,ticksize = .1,lwd=2, col = "green")
+legend(0.7, 0.8, c("Optimal/Positive (debulking = 1)", 
+                   "Suboptimal/Negative (debulking = 0)"),
+       lty=c(1,1), col=c("green", "blue"), cex = 0.52)
+```
+
+negative curve has a long right tail, so Gamma may be an appropriate prior choice. Positive curve has a longer left tail, so maybe increase the rate parameter to ensure that the right tail is weaker by exponential decay.
+
+### Modeling CHD8 Negative Arm using a Gamma Distribution
+
+```{r}
+chd.neg.gamma <- "model{
+  for (i in 1:N)
+  {
+  x[i] ~ dgamma(sh,ra)
+  }
+  
+  sh ~ dgamma(0.5, 0.5)
+  ra ~ dgamma(0.5, 0.5)
+}"
+  
+num_chains <- 3
+init_vals <- vector("list",length=num_chains)
+for(i in 1:num_chains){
+  init_vals[[i]]$.RNG.name="base::Mersenne-Twister"
+  init_vals[[i]]$.RNG.seed=117+i
+}
+
+
+
+chd.neg.gamma <- jags(data = list(x = as.vector(exp(chd.neg)),N=length(chd.neg)), inits = init_vals, parameters.to.save = c("sh", "ra"), model.file = textConnection(chd.neg.gamma), n.chains=num_chains, n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+```{r}
+print(chd.neg.gamma)
+```
+```{r}
+plot(chd.neg.gamma)
+```
+```{r,fig.width=15}
+# extract samples simulated from posterior for shape and rate
+
+sh.chain.chd.neg <- chd.neg.gamma$sims.list$sh
+ra.chain.chd.neg <- chd.neg.gamma$sims.list$ra
+
+curve(dgamma(x, mean(sh.chain.chd.neg), mean(ra.chain.chd.neg)), from = 0, to = 10, xlab = "CHD8 (non-log) Expression", ylab = "Density", main = "CHD8 Negative Arm Approximate Posterior Predictive - Gamma Model")
+
+
+```
+
+### Modeling CHD8 Positive Arm using a Gamma Distribution
+
+```{r}
+chd.pos.gamma <- "model{
+  for (i in 1:N)
+  {
+  x[i] ~ dgamma(sh,ra)
+  }
+  
+  sh ~ dgamma(0.5, 0.5)
+  ra ~ dgamma(2, 0.5)
+}"
+  
+num_chains <- 3
+init_vals <- vector("list",length=num_chains)
+for(i in 1:num_chains){
+  init_vals[[i]]$.RNG.name="base::Mersenne-Twister"
+  init_vals[[i]]$.RNG.seed=117+i
+}
+
+#exponentiate log-transformed data s.t. Gamma can handle all positive values
+chd.pos.exp <- exp(chd.pos)
+
+chd.pos.gamma <- jags(data = list(x = as.vector(chd.pos.exp),N=length(chd.pos.exp)), inits = init_vals, parameters.to.save = c("sh", "ra"), model.file = textConnection(chd.pos.gamma), n.chains=num_chains, n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+```{r}
+print(chd.pos.gamma)
+```
+```{r}
+plot(chd.pos.gamma)
+```
+
+```{r, fig.width=15}
+sh.chain.chd.pos <- chd.pos.gamma$sims.list$sh
+ra.chain.chd.pos <- chd.pos.gamma$sims.list$ra
+
+curve(dgamma(x, mean(sh.chain.chd.pos), mean(ra.chain.chd.pos)), from = 0, to = 10, xlab = "CHD8 (non-log) Expression", ylab = "Density", main = "CHD8 Positive Arm Approximate Posterior Predictive - Gamma Model")
+
+```
+
+
+### Modeling CHD8 Negative Arm using a Normal Distribution
+
+```{r}
+chd.neg.normal <- "model {
+
+  for (i in 1:N){
+  x[i] ~ dnorm(mu, tau)
+  }
+
+mu ~ dnorm(0,1)
+tau <- pow(sigma, -2)
+sigma ~ dunif(0,2)
+}
+"
+
+# Create reproducibility list - jags requires us to set the random number 
+#   generator type and seed for EACH chain. Mersenne-Twister is the default R RNG.
+num_chains <- 3
+init_vals <- vector("list",length=num_chains)
+for(i in 1:num_chains){
+  init_vals[[i]]$.RNG.name="base::Mersenne-Twister"
+  init_vals[[i]]$.RNG.seed=117+i
+}
+
+chd.neg.Bayes <- jags(data = list(x = as.vector(chd.neg),N=length(chd.neg)), 
+                       inits = init_vals, parameters.to.save = c("mu", "sigma"), 
+                       model.file = textConnection(chd.neg.normal), n.chains=num_chains, 
+                       n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+
+
+```{r}
+print(chd.neg.Bayes)
+```
+
+```{r}
+plot(chd.neg.Bayes)
+```
+
+```{r, fig.width=15}
+# extract samples simulated from posterior for mu and sigma
+
+mu.chain.chd.neg <- chd.neg.Bayes$sims.list$mu
+sigma.chain.chd.neg <- chd.neg.Bayes$sims.list$sigma
+
+curve(dnorm(x, mean(mu.chain.chd.neg), mean(sigma.chain.chd.neg)), from = 0, to = 10, xlab = "Log Expression", ylab = "Density", main = "CHD8 Negative Arm Approximate Posterior Predictive")
+
+
+```
+
+### Modeling CHD8 Positive Arm using a Normal Distribution
+
+```{r}
+chd.pos.normal <- "model {
+
+  for (i in 1:N){
+  x[i] ~ dnorm(mu, tau)
+  }
+
+mu ~ dnorm(0,1)
+tau <- pow(sigma, -2)
+sigma ~ dunif(0,2)
+}
+"
+
+
+chd.pos.Bayes <- jags(data = list(x = as.vector(chd.pos),N=length(chd.pos)), 
+                       inits = init_vals, parameters.to.save = c("mu", "sigma"), 
+                       model.file = textConnection(chd.pos.normal), n.chains=num_chains, 
+                       n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+
+
+```{r}
+print(chd.pos.Bayes)
+```
+
+```{r}
+plot(chd.pos.Bayes)
+```
+
+```{r, fig.width=15}
+# extract samples simulated from posterior for mu and sigma
+
+mu.chain.chd.pos <- chd.pos.Bayes$sims.list$mu
+sigma.chain.chd.pos <- chd.pos.Bayes$sims.list$sigma
+
+curve(dnorm(x, mean(mu.chain.chd.pos), mean(sigma.chain.chd.pos)), from = 0, to = 10, xlab = "Log Expression", ylab = "Density", main = "CHD8 Positive Arm Approximate Posterior Predictive")
+
+
+```
+
+
+## DNAJC6
+
+```{r}
+
+dnajc.neg <- exprs(GSE32063_eset)["DNAJC6",][which(YY == 0)]
+dnajc.pos <- exprs(GSE32063_eset)["DNAJC6",][which(YY == 1)]
+```
+
+
+### plot empirical density curves to determine prior
+
+```{r}
+par(mfrow = c(1,2))
+plot(density(dnajc.neg), xlab = "Log DNAJC6 Expression", col = 4, lwd = 2,
+     main = "Empirical Density Curves of CHD8 Positive and Negative Cases",
+     ylim = c(0, 2))
+rug(dnajc.neg,ticksize = .15,lwd=2, col = "blue")
+lines(density(dnajc.pos),xlab="Log DNAJC6 Expression",col=3,lwd=2,main="")
+rug(dnajc.pos,ticksize = .1,lwd=2, col = "green")
+legend(0.7, 0.8, c("Optimal/Positive (debulking = 1)", 
+                   "Suboptimal/Negative (debulking = 0)"),
+       lty=c(1,1), col=c("green", "blue"), cex = 0.52)
+
+# again with exp - transformed
+plot(density(exp(dnajc.neg)), 
+     xlab = "DNAJC6 Expression", 
+     col = 4, lwd = 2,
+     main = "Empirical Density Curves of DNAJC6 Cases (Exp-transformed)",
+     ylim = c(0, 500))
+rug(exp(dnajc.neg), ticksize = 0.15, lwd = 2, col = "blue")
+lines(density(exp(dnajc.pos)), 
+      col = 3, lwd = 2)
+rug(exp(dnajc.pos), ticksize = 0.1, lwd = 2, col = "green")
+legend("topright", 
+       legend = c("Optimal/Positive (debulking = 1)", 
+                  "Suboptimal/Negative (debulking = 0)"),
+       lty = 1, col = c("green", "blue"), cex = 0.52)
+```
+
+Like CHD8, the suboptimal/negative curve has a long right tail. Moreover, the positive curve is much more flat, also with a right tail. Observing the original data, non-log transformed, both curves have a long right tail, which could be modeled with a Gamma distribution. Since Gamma is only defined for positive values, as I learned with CHD8, I must use the non-log transformed values for ```DNAJC6``` expression. 
+
+### Modeling DNAJC Negative Arm using a Gamma Distribution
+```{r}
+dnajc.neg.gamma <- "model{
+  for (i in 1:N)
+  {
+  x[i] ~ dgamma(sh,ra)
+  }
+  
+  #sh ~ dgamma(4, 1000) # so prior on X has E[X] shape/rate 0.004
+                        # make more strongly informative to narrow posterior
+  sh ~ dgamma(1, 1)   # try more uninformative to widen posterior
+  ra ~ dgamma(1, 1) 
+}"
+
+# use specified num_chains and init_vals as in CHD models
+
+dnajc.neg.gamma <- jags(data = list(x = as.vector(exp(dnajc.neg)),N=length(dnajc.neg)), inits = init_vals, parameters.to.save = c("sh", "ra"), model.file = textConnection(dnajc.neg.gamma), n.chains=num_chains, n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+```{r}
+print(dnajc.neg.gamma)
+```
+```{r}
+plot(dnajc.neg.gamma)
+```
+```{r, fig.width=15}
+sh.chain.dnajc.neg <- dnajc.neg.gamma$sims.list$sh
+ra.chain.dnajc.neg <- dnajc.neg.gamma$sims.list$ra
+
+curve(dgamma(x, mean(sh.chain.dnajc.neg), mean(ra.chain.dnajc.neg)), from = -0.001, to = 0.001, xlab = "DNAJC6 (non-log) Expression", ylab = "Density", main = "DNAJC6 Negative Arm Approximate Posterior Predictive - Gamma Model")
+
+```
+
+### Modeling DNAJC Positive Arm using a Gamma Distribution
+```{r}
+dnajc.pos.gamma <- "model{
+  for (i in 1:N)
+  {
+  x[i] ~ dgamma(sh,ra)
+  }
+  
+  sh ~ dgamma(1, 500) # so prior on X has E[X] shape/rate 0.002
+  ra ~ dgamma(1, 1) 
+}"
+
+# use specified num_chains and init_vals as in CHD models
+
+dnajc.pos.gamma <- jags(data = list(x = as.vector(exp(dnajc.pos)),N=length(dnajc.pos)), inits = init_vals, parameters.to.save = c("sh", "ra"), model.file = textConnection(dnajc.pos.gamma), n.chains=num_chains, n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+```{r}
+print(dnajc.pos.gamma)
+```
+```{r}
+plot(dnajc.pos.gamma)
+```
+```{r, fig.width=15}
+sh.chain.dnajc.pos <- dnajc.pos.gamma$sims.list$sh
+ra.chain.dnajc.pos <- dnajc.pos.gamma$sims.list$ra
+
+curve(dgamma(x, mean(sh.chain.dnajc.pos), mean(ra.chain.dnajc.pos)), from = 0, to = 0.01, xlab = "Expression", ylab = "Density", main = "DNAJC Positive Arm Approximate Posterior Predictive - Gamma Model")
+
+```
+
+
+The posterior seems uninformative even after specifying a more informative prior for both positive and negative arms. It may be better to work with log-transformed data in a Normal Distribution. Since the shape parameter is less than 1, the gamma function behaves as $x^{\text{shape} - 1}$, squishing the density near 0. 
+
+
+### Modeling DNAJC6 Negative Arm using a Normal Distribution
+
+```{r}
+dnajc.neg.normal <- "model {
+
+  for (i in 1:N){
+  x[i] ~ dnorm(mu, tau)
+  }
+
+mu ~ dnorm(0,1)
+tau <- pow(sigma, -2)
+sigma ~ dunif(0,2)
+}
+"
+
+
+dnajc.neg.Bayes <- jags(data = list(x = as.vector(dnajc.neg),N=length(dnajc.neg)), 
+                       inits = init_vals, parameters.to.save = c("mu", "sigma"), 
+                       model.file = textConnection(dnajc.neg.normal), n.chains=num_chains, 
+                       n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+```{r}
+print(dnajc.neg.Bayes)
+```
+
+```{r}
+plot(dnajc.neg.Bayes)
+```
+
+```{r, fig.width=15}
+mu.chain.dnajc.neg <- dnajc.neg.Bayes$sims.list$mu
+sigma.chain.dnajc.neg <- dnajc.neg.Bayes$sims.list$sigma
+
+curve(dnorm(x, mean(mu.chain.dnajc.neg), mean(sigma.chain.dnajc.neg)), from = -10, to = 0, xlab = "Log Expression", ylab = "Density", main = "DNAJC Negative Arm Approximate Posterior Predictive - Normal Model")
+
+```
+
+
+### Modeling DNAJC6 Positive Arm using a Normal Distribution
+
+```{r}
+dnajc.pos.normal <- "model {
+
+  for (i in 1:N){
+  x[i] ~ dnorm(mu, tau)
+  }
+
+mu ~ dnorm(0,1)
+tau <- pow(sigma, -2)
+sigma ~ dunif(0,2)
+}
+"
+
+
+dnajc.pos.Bayes <- jags(data = list(x = as.vector(dnajc.pos),N=length(dnajc.pos)), 
+                       inits = init_vals, parameters.to.save = c("mu", "sigma"), 
+                       model.file = textConnection(dnajc.pos.normal), n.chains=num_chains, 
+                       n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+```{r}
+print(dnajc.pos.Bayes)
+```
+
+```{r}
+plot(dnajc.pos.Bayes)
+```
+
+```{r, fig.width=15}
+mu.chain.dnajc.pos <- dnajc.pos.Bayes$sims.list$mu
+sigma.chain.dnajc.pos <- dnajc.pos.Bayes$sims.list$sigma
+
+curve(dnorm(x, mean(mu.chain.dnajc.pos), mean(sigma.chain.dnajc.pos)), from = -10, to = 0, xlab = "Log Expression", ylab = "Density", main = "DNAJC Positive Arm Approximate Posterior Predictive - Normal Model")
+
+```
+
+because of the extremely low shape paremeter and long right tail of the posterior distribution in the Gamma ```DNAJC```, I will attempt another model with the aim of better capturing low values of gene expression with a Weibull Distribution
+
+### Modeling DNAJC6 Negative Arm using a Weibull Distribution (FAILED)
+
+```{r, echo=FALSE}
+# do a 'shift' to make log-expression values nonnegative for log-weibull
+# jags.data <- list(
+#   x = as.vector(dnajc.neg),
+#   N = length(dnajc.neg),
+#   SHIFT = min(dnajc.neg)
+# )
+# 
+# dnajc.neg.weib <- "model {
+#   for (i in 1:N) {
+#     # Shifted log of x:
+#     z[i] <- x[i] - SHIFT
+#     z[i] ~ dweib(shape, rate)
+#     # NB: z[i] must be >= 0 for all i.
+#   }
+# 
+#   shape ~ dgamma(1, 1)  # or some weakly informative prior
+#   rate  ~ dgamma(1, 1)
+# 
+# }
+# "
+# 
+# for(i in 1:num_chains){
+#   init_vals[[i]]$.RNG.name="base::Mersenne-Twister"
+#   init_vals[[i]]$.RNG.seed=117+i
+# }
+# 
+# 
+# dnajc.neg.weib <- jags(data = jags.data, 
+#                        inits = init_vals, 
+#                        parameters.to.save = c("shape", "rate"), 
+#                        model.file = textConnection(dnajc.neg.weib),
+#                        n.chains=num_chains,
+#                        n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+
+It seems that a Weibull distribution faced similar problems to the Gamma with high density around 0. Will try shifting the gamma distribution to maintain larger spread from log-transformed data for lower average expression values.
+
+
+### Modeling DNAJC6 Negative Arm using a SHIFTED Gamma Distribution
+```{r}
+dnajc.neg.gamma2 <- "model{
+  for (i in 1:N)
+  {
+  x[i] ~ dgamma(sh,ra)
+  }
+  
+  #sh ~ dgamma(4, 1000) # so prior on X has E[X] shape/rate 0.004
+                        # make more strongly informative to narrow posterior
+  sh ~ dgamma(1, 1)   # try more uninformative to widen posterior
+  ra ~ dgamma(1, 1) 
+}"
+
+# use specified num_chains and init_vals as in CHD models
+# add shift plus perturbance 0.5 s.t. values are all > 0
+
+dnajc.neg.gamma2 <- jags(data = list(x = as.vector((dnajc.neg - min(dnajc.neg) +  0.5)),N=length(dnajc.neg)), inits = init_vals, parameters.to.save = c("sh", "ra"), model.file = textConnection(dnajc.neg.gamma2), n.chains=num_chains, n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+
+
+```{r}
+print(dnajc.neg.gamma2)
+```
+
+```{r}
+plot(dnajc.neg.gamma2)
+```
+
+```{r, fig.width=15}
+sh.chain.dnajc.neg2 <- dnajc.neg.gamma2$sims.list$sh
+ra.chain.dnajc.neg2 <- dnajc.neg.gamma2$sims.list$ra
+
+curve(dgamma(x, mean(sh.chain.dnajc.neg2), scale = 1 / mean(ra.chain.dnajc.neg2)), from = 0, to = 4, xlab = "Shifted Expression", ylab = "Density", main = paste("DNAJC Negative Arm Approximate Posterior Predictive - Shifted Gamma Model by", abs(min(dnajc.neg)) + 0.5))
+
+```
+
+### Modeling DNAJC6 Positive Arm using a SHIFTED Gamma Distribution
+
+```{r}
+dnajc.pos.gamma2 <- "model{
+  for (i in 1:N)
+  {
+  x[i] ~ dgamma(sh,ra)
+  }
+  
+  #sh ~ dgamma(4, 1000) # so prior on X has E[X] shape/rate 0.004
+                        # make more strongly informative to narrow posterior
+  sh ~ dgamma(1, 1)   # try more uninformative to widen posterior
+  ra ~ dgamma(1, 1) 
+}"
+
+# use specified num_chains and init_vals as in CHD models
+# add shift plus perturbance 0.5 s.t. values are all > 0
+
+dnajc.pos.gamma2 <- jags(data = list(x = as.vector((dnajc.pos - min(dnajc.pos) +  0.5)),N=length(dnajc.pos)), inits = init_vals, parameters.to.save = c("sh", "ra"), model.file = textConnection(dnajc.pos.gamma2), n.chains=num_chains, n.iter=20000, n.burnin = 2000, n.adapt = 2000, n.thin=10)
+```
+
+
+```{r}
+print(dnajc.pos.gamma2)
+```
+
+```{r}
+plot(dnajc.pos.gamma2)
+```
+
+```{r, fig.width=15}
+sh.chain.dnajc.pos2 <- dnajc.pos.gamma2$sims.list$sh
+ra.chain.dnajc.pos2 <- dnajc.pos.gamma2$sims.list$ra
+
+curve(dgamma(x, mean(sh.chain.dnajc.pos2), scale = 1 / mean(ra.chain.dnajc.pos2)), from = 0, to = 4, xlab = "Shifted Expression", ylab = "Density", main = paste("DNAJC Positive Arm Approximate Posterior Predictive - Shifted Gamma Model by",abs(min(dnajc.pos))+0.5))
+
+```
+
+# 2) Using an MCMC, generate a sample from the posterior distribution of the ROC curve for each biomarker, and plot it. 
+
+## Then compute the probability that the area under the ROC curve (AUC) for CHD8 is higher than that for DNAJC6. Perform this analysis using each of your two alternative models (for a total of four comparisons), and give a discussion of your results.
+
+```{r}
+# Create functions for both CDFs 
+# use Normal for more informative posterior
+norm.cdf1 <- function(x,n) pnorm(x, mu.chain.chd.neg[n], sd = sigma.chain.chd.neg[n]) 
+# CDF of negative arm
+
+norm.cdf2 <- function(x,n) pnorm(x, mu.chain.chd.pos[n], sd = sigma.chain.chd.pos[n]) 
+# CDF of positive arm
+
+#For ROC curves, one can take threshold values (they should correspond to min/max of the empirical density expression ranges) and plot the CDF values corresponding to each other. Then, you can employ the trapezoid rule to obtain the AUC.
+
+# Sequence of thresholds - BE CAREFUL TO USE THE RIGHT ONES ON THE PROJECT, SINCE THEY CONSIDER DIFFERENT BIOMARKERS!
+# max chd.pos ~ 1.84
+# min chd.pos ~ -0.2
+# max chd.neg ~ 2.56
+# min chd.neg ~ 1.02
+
+k = seq(-0.2, 2.57, 0.01)
+N.draws = 1000 # Number of parameter draws to look at
+plot(norm.cdf1(k, 1), norm.cdf2(k,1), type = "l", xlim=c(0,1), ylim=c(0,1)) # Plot first ROC Curve
+
+# cannot use plot(add = T) here since above is plot.default method.
+for(i in 2:N.draws){
+  lines(norm.cdf1(k,i), norm.cdf2(k,i), type = "l", col="#00000044")
+}
+abline(a = 0, b = 1, col = "red") # Add 45 degree line
+```
+
+```{r}
+AUC.chd <- rep(0, N.draws)
+for(i in 1:N.draws){ 
+  AUC.chd[i] <- trapz(sort(norm.cdf1(k,i)), sort(norm.cdf2(k,i))) 
+  # trapz calls out an approxmation using the trapezoid rule. We have to 
+  # sort the cdf values first!
+} 
+mean(AUC.chd)
+sd(AUC.chd)
+```
+```{r}
+# again, use Normal for more informative posterior
+norm.cdf3 <- function(x,n) pnorm(x, mu.chain.dnajc.neg[n], sd = sigma.chain.dnajc.neg[n]) 
+# CDF of negative arm
+
+norm.cdf4 <- function(x,n) pnorm(x, mu.chain.dnajc.pos[n], sd = sigma.chain.dnajc.pos[n]) 
+
+# max dnajc.pos ~ -5.24
+# min dnajc.pos ~ -8.02
+# max dnajc.neg ~ -5.015
+# min dnajc.neg ~ -5.97
+
+k = seq(-8.03, -5.0, 0.01)
+N.draws = 1000 # Number of parameter draws to look at
+plot(norm.cdf3(k, 1), norm.cdf4(k,1), type = "l", xlim=c(0,1), ylim=c(0,1)) # Plot first ROC Curve
+
+# cannot use plot(add = T) here since above is plot.default method.
+for(i in 2:N.draws){
+  lines(norm.cdf3(k,i), norm.cdf4(k,i), type = "l", col="#00000044")
+}
+abline(a = 0, b = 1, col = "red") # Add 45 degree line
+```
+
+```{r}
+AUC.dnajc <- rep(0, N.draws)
+for(i in 1:N.draws){ 
+  AUC.dnajc[i] <- trapz(sort(norm.cdf3(k,i)), sort(norm.cdf4(k,i))) 
+  # trapz calls out an approxmation using the trapezoid rule. We have to 
+  # sort the cdf values first!
+} 
+mean(AUC.dnajc)
+sd(AUC.dnajc)
+```
+
+### do the same for the Gamma Models
+
+```{r}
+# Functions for both Gamma CDFS
+gamma.cdf1 <- function(x,n) pgamma(x, sh.chain.chd.neg[n], rate = ra.chain.chd.neg[n]) 
+# CDF of negative arm
+
+gamma.cdf2 <- function(x,n) pgamma(x, sh.chain.chd.pos[n], rate = ra.chain.chd.pos[n]) 
+# CDF of positive arm
+
+#For ROC curves, one can take threshold values (they should correspond to min/max of the empirical density expression ranges) and plot the CDF values corresponding to each other. Then, you can employ the trapezoid rule to obtain the AUC.
+
+# Sequence of thresholds - ALL EXPONENTIATED FOR GAMMA
+# max chd.pos ~ 1.84
+# min chd.pos ~ -0.2
+# max chd.neg ~ 2.56
+# min chd.neg ~ 1.02
+
+k = seq(-0.8, 12.9, 0.05) # use exp() min and max values for k
+N.draws = 1000 # Number of parameter draws to look at
+plot(gamma.cdf1(k, 1), gamma.cdf2(k,1), type = "l", xlim=c(0,1), ylim=c(0,1)) # Plot first ROC Curve
+
+# cannot use plot(add = T) here since above is plot.default method.
+for(i in 2:N.draws){
+  lines(gamma.cdf1(k,i), gamma.cdf2(k,i), type = "l", col="#00000044")
+}
+abline(a = 0, b = 1, col = "red") # Add 45 degree line
+```
+
+```{r}
+AUC.chd.gamma <- rep(0, N.draws)
+for(i in 1:N.draws){ 
+  AUC.chd.gamma[i] <- trapz(sort(gamma.cdf1(k,i)), sort(gamma.cdf2(k,i))) 
+  # trapz calls out an approxmation using the trapezoid rule. We have to 
+  # sort the cdf values first!
+} 
+mean(AUC.chd.gamma)
+sd(AUC.chd.gamma)
+```
+```{r}
+# Gamma for dnjac
+gamma.cdf3 <- function(x,n) pgamma(x, sh.chain.dnajc.neg[n], rate = ra.chain.dnajc.neg[n]) 
+# CDF of negative arm
+
+gamma.cdf4 <- function(x,n) pgamma(x, sh.chain.dnajc.pos[n], rate = ra.chain.dnajc.pos[n]) 
+
+# all EXPONENTIATED
+# max dnajc.pos ~ 0.005
+# min dnajc.pos ~ 0.0003
+# max dnajc.neg ~ 0.0066
+# min dnajc.neg ~ 0.0025
+
+k = seq(0, 0.1, 0.001) # go beyond max since Gamma dist. has a long tail
+N.draws = 1000 # Number of parameter draws to look at
+plot(gamma.cdf3(k, 1), gamma.cdf4(k,1), type = "l", xlim=c(0,1), ylim=c(0,1)) # Plot first ROC Curve
+
+# cannot use plot(add = T) here since above is plot.default method.
+for(i in 2:N.draws){
+  lines(gamma.cdf3(k,i), gamma.cdf4(k,i), type = "l", col="#00000044")
+}
+abline(a = 0, b = 1, col = "red") # Add 45 degree line
+```
+
+```{r}
+# AUC.dnajc <- rep(0, N.draws)
+# for(i in 1:N.draws){ 
+#   AUC.dnajc[i] <- trapz(sort(norm.cdf3(k,i)), sort(norm.cdf4(k,i))) 
+#   # trapz calls out an approxmation using the trapezoid rule. We have to 
+#   # sort the cdf values first!
+# } 
+# mean(AUC.dnajc)
+# sd(AUC.dnajc)
+```
+
+### Try Shifted Gamma models for ```DNAJC6```
+```{r}
+# Gamma for dnjac
+gamma.cdf5 <- function(x,n) pgamma(x, sh.chain.dnajc.neg2[n], rate = ra.chain.dnajc.neg2[n]) 
+# CDF of negative arm
+
+gamma.cdf6 <- function(x,n) pgamma(x, sh.chain.dnajc.pos2[n], rate = ra.chain.dnajc.pos2[n]) 
+
+# all SHIFTED
+# max max(dnajc.pos) - min(dnajc.pos) + 0.5 ~ 3.2
+# min min(dnajc.pos) - min(dnajc.pos) + 0.5 = 0.5
+# max max(dnajc.neg) - min(dnajc.neg) + 0.5 = 1.45
+# min min(dnajc.neg) - min(dnajc.neg) + 0.5 = 0.5
+
+k = seq(0.5, 5, 0.1) # go beyond max since Gamma dist. has a long tail
+N.draws = 1000 # Number of parameter draws to look at
+plot(1-gamma.cdf5(k, 1), 1-gamma.cdf6(k,1), type = "l", xlim=c(0,1), ylim=c(0,1)) # Plot first ROC Curve
+
+# cannot use plot(add = T) here since above is plot.default method.
+for(i in 2:N.draws){
+  lines(1-gamma.cdf5(k,i), 1-gamma.cdf6(k,i), type = "l", col="#00000044")
+}
+abline(a = 0, b = 1, col = "red") # Add 45 degree line
+```
+```{r}
+AUC.dnajc.gam <- rep(0, N.draws)
+for(i in 1:N.draws){ 
+  AUC.dnajc.gam[i] <- trapz(sort(1-gamma.cdf5(k,i)), sort(1-gamma.cdf6(k,i))) 
+  # trapz calls out an approxmation using the trapezoid rule. We have to 
+  # sort the cdf values first!
+} 
+mean(AUC.dnajc.gam)
+sd(AUC.dnajc.gam)
+```
+
+## Comparing ```CHD8``` models
+
+```{r}
+mean(AUC.chd<AUC.chd.gamma)
+```
+
+## Comparing ```DNAJC6``` models
+
+
+```{r}
+mean(AUC.dnajc<AUC.dnajc.gam)
+```
+
+
+
+
+## Comparing ```CHD8``` and ```DNAJC6``` as Biomarkers
+
+```{r}
+mean(AUC.chd<AUC.dnajc)
+```
+
+There is a a roughly 56.8% chance that ```DNAJC6``` has a higher AUC. 
+
+```{r}
+mean(AUC.chd.gamma<AUC.dnajc.gam)
+```
+Biomarker ```CHD8``` will have a lower AUC than ```DNAJC6``` 64.9% of the time according to the two Gamma models. That being said, the two Gamma models were evaluated differently. Because of the higher expression of CHD8 as measured by microarray analysis, the true values were able to be used for the Gamma model. On the other hand, DNAJC6 had magnitudes lower expression for both classes of optimal and suboptimal debulking, making it unfeasible to exponentiate the log-transformed expression values, as the low shape parameter lead to an inaccurate posterior distribution with density squished near 0 and poor AUC. As follows, a shift was necessary to coerce a reasonable shape value for a more centered posterior.
+
+
+# 3) Consider a cutoff of 2 on CHD8 expressions.
+
+Estimate the positive predictive value (PPV) of observing CHD8 expressions greater than 2. Provide a 95% posterior interval on the PPV. Briefly interpret what the interval tells us in your own words.
+
+```{r}
+# get prev 
+pi = sum(YY==1)/(sum(YY==0)+sum(YY==1))
+
+PPV = rep(0,1000)
+
+cutoff = 2 # exponentiated the Gamma dist., so expression value is 2
+
+for (i in 1:1000){
+  PPV[i] = ((gamma.cdf2(cutoff,i))*pi)/((gamma.cdf2(cutoff,i))*pi+(gamma.cdf1(cutoff,i))*(1-pi))
+}
+
+mean(PPV)
+```
+
+```{r}
+hist(PPV,breaks = 30)
+abline(v=quantile(PPV,0.975),col = 'red',lwd = 2)
+abline(v=quantile(PPV,0.025),col = 'red',lwd = 2)
+```
+
+```{r}
+mean_PPV <- mean(PPV)
+names(mean_PPV) <- "Mean"
+
+c(quantile(PPV,0.025), mean_PPV, quantile(PPV,0.975))
+```
+The interval tells us that, given our current gamma distribution model and sample for CHD8, the probability of optimal debulking given the presence of the biomarker above a threshold - $P(1 | CHD8 > 2) - lies between 0.468 and 0.944. Given the wide range of the interval representing considerable uncertainly, it seems that a larger sample size or a parallel study of the same biomarker would lead us to a better approximation of whether CHD8 could be a viable biomarker to predict optimal debulking at a cutoff of 2.

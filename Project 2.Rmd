@@ -1,0 +1,326 @@
+---
+title: "Project 2"
+author: "Kent Codding"
+date: "2025-03-31"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# read in packages, data
+
+```{r}
+library(rjags)
+library(coda)
+library(jagsUI)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggridges)
+
+path <- "CXCL14_dat_7.txt"
+df <- 
+read.delim2(path, header = TRUE, sep = " ", dec = ".")
+```
+```{r}
+
+```
+
+
+# Project Questions
+
+## 1.
+
+Do the studies support the conclusion that CXCL14 is a useful biomarker?
+
+
+## 2. 
+
+In a hypothetical new study, what is the probability that a patient with a CXCL14 expression level of your choice will have an optimal surgery? Please make your own necessary assumptions about parameters in the new study, and state them clearly.
+
+## 3. 
+
+What is the probability that a hypothetical new study with 100 patients will show a significant p-value (< 0.05) for the difference between the two surgical outcomes?
+
+# Methods
+
+## EDA
+
+Here, I perform exploratory data analysis to plot gene expression across studies in order to inform prior choice, patient-level distributions, and study-level distributions. I have chosen to stack the denisty curves for each study on the same x-axis.
+
+```{r, fig.height=20, fig.width=10}
+# new grouping variable for debulking
+df <- df %>%
+  mutate(Debulking = ifelse(YY == 1, "Optimal", "Suboptimal"))
+
+ggplot(df, aes(x = XX, color = Debulking, fill = Debulking)) +
+  geom_density(alpha = 0.3, linewidth = 1) +
+  geom_rug(aes(color = Debulking), linewidth = 0.8) +
+  facet_wrap(~ZZ, ncol = 2, scales = "fixed") +
+  labs(x = "CXCL14 Expression",
+       title = "Empirical Density of CXCL14 Expression by Study",
+       subtitle = "Blue: Optimal, Green: Suboptimal") +
+  scale_color_manual(values = c("Optimal" = "blue", "Suboptimal" = "green")) +
+  scale_fill_manual(values = c("Optimal" = "blue", "Suboptimal" = "green")) +
+  theme_bw() +
+  theme(legend.position = "top",
+        strip.text = element_text(size = 10),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+
+```
+
+```{r}
+ggplot(df, aes(x = XX, color = Debulking, fill = Debulking)) +
+  geom_density(alpha = 0.3, linewidth = 1) +
+  geom_rug(aes(color = Debulking), linewidth = 0.8) +
+  labs(x = "CXCL14 Expression",
+       title = "Overall Empirical Density of CXCL14 Expression (All Studies)",
+       subtitle = "Blue: Optimal, Green: Suboptimal") +
+  scale_color_manual(values = c("Optimal" = "blue", "Suboptimal" = "green")) +
+  scale_fill_manual(values = c("Optimal" = "blue", "Suboptimal" = "green")) +
+  theme_bw() +
+  theme(legend.position = "top")
+```
+
+
+## Model Bayesian MCMC
+
+
+
+
+### a)  Choice of patient-level distributions and their parameterizations
+
+Pooling patient-level distributions assumes that all 1221 patients have the same relationship of CXCL14-debulking status. That is, all patients are treated as the same population. The assumption of homogeneity allows for efficiency and maximization of statistical power to estimate an overall effect. The study-level distributions can account for the heterogeneity that occurs from different studies analyzing different representative samples of the population
+
+### b)  Choice of study-level distributions; decisions about which parameters are model hierarchically versus independently across studies (e.g. in the binary case we modeled lambda’s hierarchically and theta0’s independently)
+
+For study-level distributions, partial pooling is used in order to account for the aforementioned heterogeneity that likely arises due to population and specific scientific method differences among the 7 studies. For hierarchically modeling effects, $\lambda_j$ will represent the study-specific CXCL14 on the binary outcome of optimal debulking where $\lambda_j \sim \mathcal{N}(\mu_{\lambda}, \tau^{-2})$. Partial pooling also performs shrinkage on study-specific estimates, reducing overfitting by incorporating global information. Lastly, the global intercept parameter will allow interpretation to focus on the varying-slope parameter $\lambda_j$, which is the individual-study effect on increase in log-odds of optimal debulking. 
+
+
+$$
+\begin{aligned}
+\textbf{Observed Data:}\\[4pt]
+&\quad \text{For each patient } i = 1,\ldots,N,\text{ in study } j[i], \text{ observe:}\\[4pt]
+&\quad X_i:\ \text{CXCL14 expression (continuous)},\\[4pt]
+&\quad Y_i:\ \text{Debulking outcome (1 = optimal, 0 = suboptimal)}.\\[8pt]
+\textbf{Model Structure:}\\[4pt]
+&\quad Y_i \sim \text{Bernoulli}(p_i),\\[4pt]
+&\quad \text{logit}(p_i) = \alpha + \lambda_{j[i]}\,X_i,\\[4pt]
+&\quad \lambda_j \sim \mathcal{N}(\mu_{\lambda},\,\tau^{-2}), \quad j = 1,\ldots,J.\\[8pt]
+\textbf{Hyperpriors:}\\[4pt]
+&\quad \alpha \sim \mathcal{N}(0,\,0.01),\\[4pt]
+&\quad \mu_{\lambda} \sim \mathcal{N}(0,\,0.01),\\[4pt]
+&\quad \tau \text{ (precision) via continuous prior; high precision was chosen}\\[4pt]
+&\quad \text{to reflect small between-study differences.}\\[8pt]
+\textbf{Interpretation:}\\[4pt]
+&\quad \alpha \text{ is a global intercept (baseline log-odds of optimal debulking).}\\[4pt]
+&\quad \lambda_j \text{ is the study-specific slope for CXCL14,}\\[4pt]
+&\quad \quad \text{allowing partial pooling across studies (shrinkage).}\\[4pt]
+&\quad \mu_{\lambda} \text{ is the overall mean effect of CXCL14,}\\[4pt]
+&\quad \quad \text{while } \tau \text{ controls between-study heterogeneity.}
+\end{aligned}
+$$
+
+
+
+
+
+### c)  Choice of prior distributions
+
+Since each study's parameters in the partial pooling model come from an overarching prior distribution, I assign each study-specific slope $\lambda_j$ a Normal prior which can be justified by the Central Limit Theorem that is centered around a common mean $\mu_{\lambda}$. The parameter $lambda_j$ represents the increase in the log-odds of optimal debulking with each unit increase in CXCL14 expression, and this parameter is drawn from the overarching population distribution. Partial pooling also shrinks studies with fewer data points towards the overall mean $\mu_{\lambda}$, only allowing strong evidence to pull the posterior $lambda_j$ away from $\mu_{\lambda}$. 
+
+The hyperprior $\mu_{\lambda} \sim \mathcal{N}(0,\,0.01)$ centers the global log-odds effect at 0 with a weakly informative variance, allowing the data to play a large role in the posterior. The discrete prior for $\tau$ constrains the model to different levels of heterogeneity as done in Section. Since the normal distribution in Jags is parameterized by precision, the same logic was employed with the global $\alpha$ intercept parameter.
+
+```{r}
+cxcl14_model <- "
+model {
+  for (i in 1:N) {
+    # Bernoulli likelihood for each patient
+    Y[i] ~ dbern(p[i])
+    
+    # Logit link with single global intercept (alpha) 
+    # and a study-specific slope (lambda[study[i]]) for X[i].
+    logit(p[i]) <- alpha + lambda[study[i]] * X[i]
+  }
+
+  # prior for study-specific slopes
+  for (j in 1:N_studies) {
+    lambda[j] ~ dnorm(mu_lambda, precision_tau)
+  }
+  # hyperprior: mean baseline effect (intercept)
+  alpha ~ dnorm(0.0, 0.01)
+
+  # hyperprior: mean effect of CXCL14
+  mu_lambda ~ dnorm(0.0, 0.01)
+
+  # discrete prior for tau (similar to section 8 example)
+  # this controls for between-study heterogeneity in lambda.
+  tau.int.prior <- rep(0.03, 25)
+  tau.int ~ dcat(tau.int.prior)
+  tau <- tau.int * 0.01
+  precision_tau <- 1 / (tau * tau)
+}
+"
+
+```
+
+
+```{r}
+df <- df %>%
+  mutate(study_index = as.numeric(as.factor(ZZ)))
+
+model_data <- list(
+  N = nrow(df),
+  N_studies = length(unique(df$study_index)),
+  X = df$XX,
+  Y = df$YY,
+  study = df$study_index
+)
+
+
+jags_mod <- jags.model(textConnection(cxcl14_model),
+                       data = model_data,
+                       n.chains = 2,
+                       n.adapt = 500,
+                       quiet = TRUE)
+
+# PARAMETER reminders
+# 'lambda': the vector of study-specific slopes
+# 'alpha' : the global intercept
+# 'mu_lambda': the overall mean slope (distribution where lambda is drawn from )
+# 'tau.int', 'tau' etc. for the discrete prior
+params <- c("lambda", "alpha", "mu_lambda", "tau.int", "tau")
+jags_fit <- coda.samples(jags_mod, params, n.iter = 5000, thin = 5)
+
+summary(jags_fit)
+
+```
+
+
+
+
+
+
+
+# Results
+
+```{r}
+posterior_matrix <- as.matrix(jags_fit)
+
+# cols for study-specific estimates
+lambda_cols <- grep("lambda\\[", colnames(posterior_matrix), value = TRUE)
+
+# translate log-odds by exp
+or_df <- as.data.frame(exp(posterior_matrix[, lambda_cols]))
+colnames(or_df) <- gsub("lambda\\[|\\]", "", lambda_cols)
+
+or_long <- or_df %>%
+  pivot_longer(cols = everything(),
+               names_to = "study",
+               values_to = "OR")
+
+or_summary <- or_long %>%
+  group_by(study) %>%
+  summarize(
+    rr_low  = quantile(OR, 0.025),
+    rr_med  = quantile(OR, 0.50),
+    rr_high = quantile(OR, 0.975)
+  )
+
+ggplot(or_long, aes(x = OR, y = study, fill = study)) +
+  geom_density_ridges(alpha = 0.4, scale = 1.0) +
+  geom_errorbarh(data = or_summary,
+                 aes(xmin = rr_low, xmax = rr_high, y = study),
+                 height = 0.2, color = "black", inherit.aes = FALSE) +
+  geom_point(data = or_summary,
+             aes(x = rr_med, y = study),
+             color = "black", size = 2, inherit.aes = FALSE) +
+  labs(
+    x = "Odds Ratio (exp(lambda))",
+    y = "Study",
+    title = "Posterior Distributions of Study-Specific Odds Ratios"
+  ) +
+  theme_ridges() +
+  theme(legend.position = "none")
+
+```
+
+
+
+
+# 1. 
+
+95% credible intervals do not include an odds-ratio of 1.0 for any study - which represents the null hypothesis that a unit increase in CXCL14 expression has no effect on the log-odds of optimal debulking, implying that CXCL14 is a useful biomarker to predict debulking status given the data under the given model and prior assumptions. That is, each study suggests that higher CXCL14 expression consistently decreases the odds of optimal surgery. 
+
+# 2.
+
+In order to perform this calculation, I will make the assumption that the study effect size in the new study is the global effect size (slope $\mu_{\lambda}$). I will assume tht the new patient's CXCL14 expression level is 15 and will use the global intercept and slope value to compute the predicted probability of optimal debulking.
+
+$$
+\begin{aligned}
+\text{logit}(p^*) &= \alpha + \lambda_{\text{new}}\,X^*, \quad \text{with } \lambda_{\text{new}} \approx \mu_{\lambda},\\[8pt]
+p^* &= \frac{1}{1 + \exp\Bigl\{-\bigl(\alpha + \mu_{\lambda}\,X^*\bigr)\Bigr\}}.
+\end{aligned}
+$$
+```{r}
+jags_summary <- summary(jags_fit)$statistics
+alpha_est <- jags_summary["alpha", "Mean"]
+mu_lambda_est <- jags_summary["mu_lambda", "Mean"]
+X_star <- 15
+p_star <- 1 / (1 + exp(-(alpha_est + mu_lambda_est * X_star)))
+cat('the probability of optimal debulking for a patient with CXCL14 expression of 15 is', p_star)
+```
+
+# 3. 
+
+The following uses the same assumptions from question *2* that the new study-specific effect equals the global effect and keeps the global intercept and that the mean of the new study is normally distributed. For each simulation, parameters are drawn from a random posterior sample. Then, I fit a new logistic regression model to predict optimal debulking from the simulated XX and randomly generated binary YY data (with probability using hierarchical logistical model with specified assumptions above). 
+
+```{r}
+n_sims <- 1000
+n_patients <- 100
+
+jags_summary <- summary(jags_fit)$statistics
+alpha_post <- jags_fit[[1]][, "alpha"]
+mu_lambda_post <- jags_fit[[1]][, "mu_lambda"]
+
+X_mean <- mean(df$XX)
+X_sd <- sd(df$XX)
+
+signif_results <- numeric(n_sims)
+
+for(i in 1:n_sims){
+  idx <- sample(1:length(alpha_post), 1)
+  alpha_i <- alpha_post[idx]
+  mu_lambda_i <- mu_lambda_post[idx]
+  
+  X_new <- rnorm(n_patients, mean = X_mean, sd = X_sd)
+  p_new <- 1 / (1 + exp(-(alpha_i + mu_lambda_i * X_new)))
+  Y_new <- rbinom(n_patients, size = 1, prob = p_new)
+  model_new <- glm(Y_new ~ X_new, family = binomial(link = "logit"))
+  p_val <- summary(model_new)$coefficients["X_new", "Pr(>|z|)"]
+  signif_results[i] <- ifelse(p_val < 0.05, 1, 0)
+}
+
+prob_signif <- mean(signif_results)
+cat('Estimated probability that a new study will have p < 0.05, ', prob_signif)
+
+```
+
+
+# Discussion
+
+Some advantages of this analysis include reliance on logit links which convey a linear relationship on the log-odds scale. Unlike the section, where we used dichotomized data and relative risk as an effect size calculation, less biological signal is lost from using a continuous independent variable as we have observed throughout the semester. The straightforward interpretation—that an increase in log-odds translates directly into a change in outcome—allows for easy comparison across studies. Additionally, the symmetry of the odds ratio with respect to optimal and suboptimal debulking enables transformation invariance, which simplifies the interpretation of the effect size across different settings   
+
+However, there are also disadvantages associated with using the odds ratio as an effect size. When outcomes are common, the odds ratio can exaggerate the effect size relative to the relative risk, which can lead to misinterpretation if not properly adjusted for baseline risk. Unlike relative risk, which directly indicates that patients are, for example, “RR times as likely” to experience optimal debulking, the odds ratio does not convey a direct change in the absolute probability of the outcome. This means that additional steps are needed to translate the odds ratio into a more intuitive measure, making it less straightforward for those without a statistical background. For instance, the calculation above for question 2 to arrive at the probability of optimal debulking for a patient with CXCL14 expression of 15 (0.2410442) is much more nuanced than a hypothetical relative risk calculation. Compared with the above code in question 2, the probability of optimal debulking for a patient with CXCL14 expression of 15 could be calculated by 
+
+```
+predicted_risk <- baseline_risk * (RR^15)
+```
+
+Lastly, some major disadvantages of this analysis include a meta-analysis of only one biomarker. Regardless of the effect size used, recent methods like Top Scoring Pairs or mas-o-menos as we have discussed in class are simple methods with high statistical power and clinical implication primarily because of their ability to observe multiple biomarkers. Moreover, these methods are comparable with more complex ML models without using extensive compute power. Question *2* above shows that even for the extremely high gene expression value of 15, which is negatively correlated with optimal debulking both based on posterior output and density of expression in the *EDA* section, the logistic regression model cannot discriminate between optimal and suboptimal debulking with a high degree of certainty. Thus, although the results suggest that CXCL14 is a useful biomarker, this meta-analysis of seven studies is not succinct enough to inform clinical decisions without analyzing CXCL14 in conjunction with other biomarkers that may increase discrimination performance. 
+
+# Bibliography 
+
+Generative AI was used to convert written section notes and advice from Iris into Latex in order to give a mathematical explanation of the logic behind partial pooling, prior, and parameter choices and clean up data visualization techniques to best visualize study-level variation. In addition, Generative AI was used to debug code and primarily Latex compilation issues and edit discussion for grammar.

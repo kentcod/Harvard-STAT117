@@ -1,0 +1,142 @@
+---
+title: "Homework 4"
+author: "Kent Codding"
+date: "2025-04-11"
+output: pdf_document
+---
+
+For this assignment, please use the full training and testing datasets from the SwitchBox package. The datasets can be called out from the following commands:
+
+```{r}
+#BiocManager::install("switchBox")
+library(switchBox)
+data(trainingData)
+data(testingData)
+```
+
+The first two functions install and load the `switchBox` package. The last two functions, `data(trainingData)` and `data(testingData)`, load the datasets to be used: `matTesting`, `testingGroup`, `matTraining`, and `trainingGroup`.
+
+```{r}
+masomenos.train = function(X,   # pxn data frame of predictors
+                           Y,   # nx1 vectors of labels or responses
+                           P,   # number of predictors
+                           training.criterion="AUC",
+                           filtering.fraction=.5)
+{
+  # eliminate unclassified samples
+  # X <- matTraining
+  # Y <- YY
+  YY = Y[!is.na(Y)]
+  XX = X[,!is.na(Y)]
+  
+  Nvar = nrow(XX) # Number of genes
+  crite = rep(NA,Nvar) # These are to store the criterion for each gene.
+  if (training.criterion=="AUC"){
+    for (pp in 1:Nvar){
+      crite[pp] <- as.numeric( wilcox.test(XX[pp,]~YY)$statistic / (sum(YY==0)*sum(YY==1)) )
+      #XX[pp,] gives data values, YY gives levels of the groups to be compared.
+    }
+  }
+  # P = 12
+  cutoff = sort(abs(crite- 0.5) + 0.5,decreasing = TRUE)[P]
+  # cutoff = sort(abs(crite),decreasing = TRUE)[P]
+  # sort the absolute value of the criterion from largest to smallest, then look at the corresponding cutoff value of the Pth largest value.
+  cutoff
+  variables = (1:Nvar)[abs(crite- 0.5) + 0.5 >= cutoff]
+  # retrieve the variable name/number of the top P.
+  variables
+  variables.signs = ( 2 * ( crite > 0.5 ) - 1 ) [variables]
+  scores = apply ( XX[ variables, ] * variables.signs, 2, mean )
+  # this is known as the risk score, or the mean expression value for the top P genes for each patient.
+
+  if (training.criterion=="AUC"){
+    crite.mom = as.numeric( wilcox.test(scores~YY)$statistic / (sum(YY==0)*sum(YY==1)) )
+  }
+  
+  MoM = list(XX=XX,YY=YY,cutoff=cutoff,
+             training.criterion=training.criterion,
+             variables = variables,
+             variables.signs=variables.signs,
+             variables.criterion=crite[variables],
+             scores=scores,
+             criterion.mom=crite.mom)
+  return(MoM)
+}
+
+masomenos.test = function(X,   # pxn data frame of predictors
+                          Y,   # nx1 vectors of labels or responses
+                          MoM.out # output form masomenos.train
+){
+  # eliminate unclassified samples
+  # Y = 1*as.vector(testingGroup=="Good")
+  # X = matTesting
+  # X = matTesting[genename,]
+  # MoM.out = MoM.train
+  YY = Y[!is.na(Y)]
+  XX = X[,!is.na(Y)]
+
+  Nvar = nrow(XX)
+  scores = apply ( XX[ MoM.out$variables, ] * MoM.out$variables.signs, 2, mean )
+  
+  if (MoM.out$training.criterion=="AUC"){ 
+    crite.mom = as.numeric( wilcox.test(scores~YY)$statistic / (sum(YY==0)*sum(YY==1)) ) 
+  }
+  
+  MoM = list(XX=XX,YY=YY,
+             scores=scores,
+             criterion.mom=crite.mom)
+  return(MoM)
+}
+
+
+
+```
+
+
+
+Then, complete the following:
+
+1) Use the training set to develop:
+
+```{r}
+matTraining[1:10, 1:4]
+```
+```{r}
+head(trainingGroup, 10)
+```
+-- 1a) A k-tsp classifier with 6 pairs.
+
+```{r}
+classifier = SWAP.KTSP.Train(matTraining, trainingGroup, krange=6)
+print(classifier)
+```
+-- 1b) A mas-o-menos classifier using the same genes identified in the top 6 pairs in 1a.
+
+```{r}
+gene_names = c(classifier$TSPs)
+YY = 1 * as.vector(trainingGroup == "Good")
+
+mom_classifier = masomenos.train(matTraining, YY, P=12, training.criterion="AUC")
+```
+
+
+2) Compare these classifiers in the validation set, using a criterion of your choice (justify).
+
+```{r}
+tsp_result = SWAP.GetKTSP.Result(classifier, matTesting, testingGroup)
+tsp_result$stats["auc"]
+```
+
+
+```{r}
+YY_test = 1 * as.vector(testingGroup == "Good")
+mom_result = masomenos.test(matTesting, YY_test, mom_classifier)
+mom_result$criterion.mom
+```
+Evaluating the classifiers on the validation set, I chose the Area Under the Receiver Operating Characteristic Curve (AUC) as the performance metric. AUC assesses how well each model distinguishes between 'good' and 'bad' outcomes across all possible decision thresholds, thereby capturing their overall discriminative power. This metric is preferable to fixed-threshold measures like accuracy, sensitivity, or specificity because it summarizes the trade-off between true positive and false positive rates, an especially valuable feature when the classifiers are built on a limited number of gene expression pairs. Thus, based on the AUC, the mas-o-menos classifier performs better on the validation set. Since both algorithms use the same 6 genes in this example, the outcome discrimination improvement is likely due to mas-o-menos averaging the effect of multiple genes while kTSP focuses only on pairwise gene comparisons.
+
+
+## Bibliography 
+
+ChatGPT. (2025, April 14). Grammar editing assistance and R code debugging. OpenAI. Retrieved from https://openai.com/chatgpt
+

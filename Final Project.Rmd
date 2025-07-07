@@ -1,0 +1,1068 @@
+---
+title: "Final Project STAT117"
+author: "Kent Codding"
+date: "2025-04-17"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r setup, include=FALSE}
+
+
+knitr::opts_chunk$set(  
+  echo = TRUE,
+  #cache = TRUE,  
+  cache.path = "cache/"  
+  #cache.lazy = TRUE   # only re‐run if *that* chunk’s code changes  
+)
+```
+
+```{r}
+library(pROC)
+library(ROCR)
+library(rjags)
+library(coda)
+library(jagsUI)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggridges)
+
+load("C:/Users/khcod/Downloads/pCR_binary.RData")
+
+```
+
+```{r}
+baseline_m = glm(pCR[[6]] ~ pam50_pCR[[6]], family=binomial(link="logit"))
+baseline_AUC = performance(prediction(fitted(baseline_m), baseline_m$y), "auc")@y.values[[1]]
+cat('baseline binary AUC threshold is: ', baseline_AUC)
+```
+# Study-wise EDA
+
+## perform gene-selection using mas-o-menos
+
+```{r}
+masomenos.train = function(X,   # pxn data frame of predictors
+                           Y,   # nx1 vectors of labels or responses
+                           P,   # number of predictors
+                           training.criterion="AUC",
+                           filtering.fraction=.5)
+{
+  # eliminate unclassified samples
+  # X <- matTraining
+  # Y <- YY
+  YY = Y[!is.na(Y)]
+  XX = X[,!is.na(Y)]
+  
+  Nvar = nrow(XX) # Number of genes
+  crite = rep(NA,Nvar) # These are to store the criterion for each gene.
+  if (training.criterion=="AUC"){
+    for (pp in 1:Nvar){
+      crite[pp] <- as.numeric( wilcox.test(XX[pp,]~YY)$statistic / (sum(YY==0)*sum(YY==1)) )
+      #XX[pp,] gives data values, YY gives levels of the groups to be compared.
+    }
+  }
+  # P = 12
+  cutoff = sort(abs(crite- 0.5) + 0.5,decreasing = TRUE)[P]
+  # cutoff = sort(abs(crite),decreasing = TRUE)[P]
+  # sort the absolute value of the criterion from largest to smallest, then look at the corresponding cutoff value of the Pth largest value.
+  cutoff
+  variables = (1:Nvar)[abs(crite- 0.5) + 0.5 >= cutoff]
+  # retrieve the variable name/number of the top P.
+  variables
+  variables.signs = ( 2 * ( crite > 0.5 ) - 1 ) [variables]
+  scores = apply ( XX[ variables, ] * variables.signs, 2, mean )
+  # this is known as the risk score, or the mean expression value for the top P genes for each patient.
+
+  if (training.criterion=="AUC"){
+    crite.mom = as.numeric( wilcox.test(scores~YY)$statistic / (sum(YY==0)*sum(YY==1)) )
+  }
+  
+  MoM = list(XX=XX,YY=YY,cutoff=cutoff,
+             training.criterion=training.criterion,
+             variables = variables,
+             variables.signs=variables.signs,
+             variables.criterion=crite[variables],
+             scores=scores,
+             criterion.mom=crite.mom)
+  return(MoM)
+}
+
+masomenos.test = function(X,   # pxn data frame of predictors
+                          Y,   # nx1 vectors of labels or responses
+                          MoM.out # output form masomenos.train
+){
+  # eliminate unclassified samples
+  # Y = 1*as.vector(testingGroup=="Good")
+  # X = matTesting
+  # X = matTesting[genename,]
+  # MoM.out = MoM.train
+  YY = Y[!is.na(Y)]
+  XX = X[,!is.na(Y)]
+
+  Nvar = nrow(XX)
+  scores = apply ( XX[ MoM.out$variables, ] * MoM.out$variables.signs, 2, mean )
+  
+  if (MoM.out$training.criterion=="AUC"){ 
+    crite.mom = as.numeric( wilcox.test(scores~YY)$statistic / (sum(YY==0)*sum(YY==1)) ) 
+  }
+  
+  MoM = list(XX=XX,YY=YY,
+             scores=scores,
+             criterion.mom=crite.mom)
+  return(MoM)
+}
+
+```
+
+
+## First, try on study 1
+```{r}
+YY_pcr <- pCR[[1]]  
+
+# Use the masomenos.train function to select the top 10 discriminatory genes.
+mom_pcr <- masomenos.train(X = XX_pCR[[1]], Y = YY_pcr, P = 10, training.criterion = "AUC")
+
+selected_genes <- mom_pcr$variables
+
+cat("The top 10 most discriminatory genes are (by row index):\n")
+print(selected_genes)
+
+if (!is.null(rownames(XX_pCR[[1]]))) {
+  selected_gene_names_study1 <- rownames(XX_pCR[[1]])[selected_genes]
+  cat("The top 10 most discriminatory gene names are:\n")
+  print(selected_gene_names_study1)
+}
+```
+
+
+```{r}
+XX_all_pCR <- do.call(cbind, XX_pCR)
+
+# pCR is a list of binary response vectors (one per study).
+YY_all_pCR <- unlist(pCR)
+
+# Check dimensions of the merged data
+cat("Dimensions of merged expression matrix (genes x total patients): ", dim(XX_all_pCR), "\n")
+cat("Length of merged response vector: ", length(YY_all_pCR), "\n")
+```
+```{r}
+mom_pcr_all <- masomenos.train(X = XX_all_pCR, 
+                               Y = YY_all_pCR, 
+                               P = 10, 
+                               training.criterion = "AUC")
+
+# Retrieve the selected gene indices.
+selected_genes <- mom_pcr_all$variables
+cat("The top 10 most discriminatory genes (by row indices) are:\n")
+print(selected_genes)
+
+# If the matrix XX_all_pCR has row names (gene names), extract them.
+if (!is.null(rownames(XX_all_pCR))) {
+  selected_gene_names_allstudies <- rownames(XX_all_pCR)[selected_genes]
+  cat("The top 10 most discriminatory gene names are:\n")
+  print(selected_gene_names_allstudies)
+}
+```
+```{r}
+any(selected_gene_names_allstudies %in% selected_gene_names_study1)
+
+```
+
+No genes were consistent from study 1 to all using mas-o-menos to select, so it is worthwhile to check for study heterogeneity for biomarkers.
+
+
+```{r skip-broken-test, cache=TRUE, cache.rebuild=TRUE, warning=F,}
+
+selected_genes_list2 <- list()
+counter <- 0  # counter for valid studies
+
+for (i in seq_along(XX_pCR)) {
+  Y_study <- pCR[[i]]
+  if (length(unique(Y_study)) < 2) {
+    cat("Study", i, "does not have two outcome levels. Skipping.\n")
+    next
+  }
+  mom_out_i <- masomenos.train(X = XX_pCR[[i]], Y = Y_study, P = 10, training.criterion = "AUC")
+  gene_indices <- mom_out_i$variables
+  gene_names   <- rownames(XX_pCR[[i]])[gene_indices]
+  counter      <- counter + 1
+  selected_genes_list2[[counter]] <- gene_names
+}
+
+if (length(selected_genes_list2) > 0) {
+  # collapse to one long vector and tabulate
+  all_selected_genes <- unlist(selected_genes_list2)
+  gene_freq         <- table(all_selected_genes)
+  
+  # take top 20 by frequency
+  top20            <- sort(gene_freq, decreasing = TRUE)[1:20]
+  freq_df_top20    <- data.frame(
+    Gene      = names(top20),
+    Frequency = as.integer(top20),
+    row.names = NULL
+  )
+  freq_df_top20$Repeated <- ifelse(freq_df_top20$Frequency > 1, "Repeated", "Unique")
+  
+  # print just those 20
+  print(freq_df_top20)
+  
+  # plot only the top 20
+  ggplot(freq_df_top20, aes(x = reorder(Gene, Frequency), y = Frequency, fill = Repeated)) +
+    geom_col() +
+    coord_flip() +
+    labs(title = "Top 20 Most‐Frequent Selected Genes",
+         x = "Gene Name", y = "# Studies Selected") +
+    scale_fill_manual(values = c("Repeated" = "red", "Unique" = "grey70")) +
+    theme_minimal()
+}
+```
+
+
+## Visualize 10 selected genes
+
+```{r}
+par(mfrow = c(2, 5), mar = c(4, 4, 3, 1))
+
+# Loop over each gene and produce a boxplot comparing pCR=0 and pCR=1
+for(gene in selected_gene_names_allstudies) {
+  
+  # Extract the gene expression values for the gene.
+  gene_expr <- as.numeric(XX_all_pCR[gene, ])
+  
+  # Split the values by pCR outcome and remove missing values.
+  expr_0 <- gene_expr[YY_all_pCR == 0]
+  expr_1 <- gene_expr[YY_all_pCR == 1]
+  expr_0 <- expr_0[!is.na(expr_0)]
+  expr_1 <- expr_1[!is.na(expr_1)]
+  
+  # Create a list where each element corresponds to an outcome group
+  expr_by_group <- list("pCR = 0" = expr_0, "pCR = 1" = expr_1)
+  
+  # Create the boxplot
+  boxplot(expr_by_group,
+          main = paste("Gene:", gene),
+          ylab = "Expression",
+          col = c("blue", "red"))
+  
+  # add a note about fold change by comparing medians.
+  median0 <- median(expr_0, na.rm = TRUE)
+  median1 <- median(expr_1, na.rm = TRUE)
+  fold_change <- median1 / median0
+  mtext(paste("Fold change:", round(fold_change, 2)), side = 3, line = 0.5, cex = 0.8)
+}
+```
+
+
+```{r}
+# Set up a 2 x 5 plotting space for the 10 genes.
+par(mfrow = c(2, 5), mar = c(4, 4, 3, 1))
+
+# Loop over each of the 10 selected genes and produce density plots.
+for(gene in selected_gene_names_allstudies) {
+  # Extract the gene expression values for the current gene.
+  gene_expr <- as.numeric(XX_all_pCR[gene, ])
+  
+  # For each outcome, remove NAs before computing the density.
+  expr_0 <- gene_expr[YY_all_pCR == 0]
+  expr_0 <- expr_0[!is.na(expr_0)]
+  
+  expr_1 <- gene_expr[YY_all_pCR == 1]
+  expr_1 <- expr_1[!is.na(expr_1)]
+  
+  # Check that there are enough observations to calculate a density.
+  if(length(expr_0) < 2 || length(expr_1) < 2) {
+    cat("Gene", gene, "does not have enough non-missing values for both outcomes. Skipping plot.\n")
+    next
+  }
+  
+  # Calculate density estimates for each outcome.
+  density_0 <- density(expr_0)
+  density_1 <- density(expr_1)
+  
+  # Determine the common x and y limits for the plot.
+  xlim_range <- range(c(density_0$x, density_1$x))
+  ylim_range <- range(c(density_0$y, density_1$y))
+  
+  # Plot the density for pCR = 0 in blue.
+  plot(density_0, xlim = xlim_range, ylim = ylim_range,
+       main = paste("Gene:", gene),
+       xlab = "Expression", ylab = "Density",
+       col = "blue", lwd = 2)
+  
+  # Overlay the density for pCR = 1 in red.
+  lines(density_1, col = "red", lwd = 2)
+  
+  # Add a legend to the plot.
+  legend("topright", legend = c("pCR = 0", "pCR = 1"),
+         col = c("blue", "red"), lwd = 2, bty = "n")
+}
+
+```
+
+The multimodality of each of these density plots suggest that different studies may be responsible for different peaks in gene expression for both outcomes. Further, this suggests that expression for many of these genes are on a different scale, providing motivation for a hierarchical unpooled model for intercept and slope. The mas-o-menos gene selection for 10 genes produces an AUC of 
+```{r}
+mom_pcr_all$criterion.mom
+```
+## Plot mas-o-menos for 2,5,10,20,30,40,50 genes
+
+```{r}
+# Define the vector of gene counts to try.
+genes_to_try <- c(2, 5, 10, 20, 30, 40, 50)
+
+# Initialize a vector to store the AUC (criterion.mom) for each gene count.
+auc_values <- numeric(length(genes_to_try))
+
+# Loop over the gene counts.
+for (i in seq_along(genes_to_try)) {
+  P <- genes_to_try[i]
+  
+  # Run the mas-o-menos training procedure.
+  # The function calculates a Wilcoxon AUC for the risk scores generated using the top P genes.
+  mom_out <- masomenos.train(X = XX_all_pCR, Y = YY_all_pCR, P = P, training.criterion = "AUC")
+  
+  auc_values[i] <- mom_out$criterion.mom
+  
+  cat("For", P, "genes, training AUC:", round(auc_values[i], 3), "\n")
+}
+
+# Plot the AUC versus the number of genes.
+plot(genes_to_try, auc_values, type = "b",
+     xlab = "Number of Genes",
+     ylab = "Training AUC",
+     main = "mas-o-menos Criterion (AUC) vs. Number of Genes",
+     pch = 19, col = "blue")
+
+```
+This plot shows the expected plateau after more features, genes in this case, increase noise that dilutes the signal of the most discriminative genes, suggesting that the optimal number of genes to maximize AUC is likely between 10 and 20.
+
+# Pooled Logistic Regression Model
+```{r}
+# Subset the matrix to the 10 genes
+X_data <- t(XX_all_pCR[selected_gene_names_allstudies, ])
+
+# Create a data frame and add the outcome
+data_lr <- data.frame(X_data)
+data_lr$pCR <- factor(YY_all_pCR)  # factors with levels "0" and "1"
+
+# Fit a logistic regression model using all 10 gene expressions as predictors.
+model_logistic <- glm(pCR ~ ., data = data_lr, family = binomial, na.action = na.exclude)
+
+summary(model_logistic)
+
+pred_probs <- predict(model_logistic, type = "response")
+
+roc_obj <- roc(response = data_lr$pCR, predictor = pred_probs)
+auc_value <- auc(roc_obj)
+
+cat("The AUC for the logistic regression model using the 10 selected genes is:", round(auc_value, 3), "\n")
+```
+## Leave-one-study-out
+```{r}
+study_indicator <- unlist(lapply(seq_along(XX_pCR), function(j) rep(j, ncol(XX_pCR[[j]]))))
+
+
+X_mat <- t(XX_all_pCR[selected_gene_names_allstudies, ])
+
+# Build a data frame with the outcome, gene expression predictors, and study indicator.
+data_hier <- data.frame(
+  Y = YY_all_pCR,                # binary outcome (0/1)
+  X_mat,                         
+  ZZ = study_indicator           
+)
+
+# Remove any rows with missing values.
+data_hier <- data_hier[complete.cases(data_hier), ]
+```
+
+
+```{r}
+library(pROC)
+
+data_df <- data_hier
+study_numbers <- unique(data_df$ZZ)
+auc_values_glm <- numeric(length(study_numbers))
+auc_values_glm[] <- NA  # preallocate as NA
+
+for (i in seq_along(study_numbers)) {
+  test_study <- study_numbers[i]
+  
+  # Partition data: training is all studies except the current one; testing is the left-out study.
+  train_data <- subset(data_df, ZZ != test_study)
+  test_data  <- subset(data_df, ZZ == test_study)
+  
+  # Fit logistic regression on the training set.
+  model_glm <- glm(Y ~ ., data = train_data[, c(selected_gene_names_allstudies, "Y")],
+                   family = binomial)
+  
+  # Predict on the test set.
+  preds <- predict(model_glm, newdata = test_data, type = "response")
+  
+  # Check if test_data has both outcome classes.
+  if(length(unique(test_data$Y)) < 2){
+    cat("Left-out Study", test_study, "does not have two outcome classes. Skipping AUC calculation.\n")
+    next  # Skip this iteration.
+  }
+  
+  # Calculate the AUC using the pROC package.
+  roc_obj <- roc(response = test_data$Y, predictor = preds)
+  auc_values_glm[i] <- auc(roc_obj)
+  
+  cat("Left-out Study", test_study, "AUC:", round(auc_values_glm[i], 3), "\n")
+}
+
+# Compute mean AUC across studies that produced a valid AUC
+mean_auc_glm <- mean(auc_values_glm, na.rm = TRUE)
+cat("Mean LOSO AUC (glm):", round(mean_auc_glm, 3), "\n")
+
+```
+```{r}
+# Remove studies with NA AUC values.
+valid_indices <- !is.na(auc_values_glm)
+valid_studies <- study_numbers[valid_indices]
+valid_auc <- auc_values_glm[valid_indices]
+
+# Create the scatter plot.
+plot(valid_studies, valid_auc, 
+     pch = 16, col = "blue",
+     xlab = "Study Number", 
+     ylab = "Validation AUC",
+     main = "LOSO MoM(P=10) Validation AUC by Study",
+     ylim = c(min(valid_auc) - 0.05, max(valid_auc) + 0.05))
+
+# Add horizontal lines:
+abline(h = mean_auc_glm, col = "red", lwd = 2, lty = 2)   # Mean Validation AUC
+abline(h = 0.684, col = "blue", lwd = 2, lty = 2)          # Training AUC (0.684)
+
+# add text labels for each study.
+text(valid_studies, valid_auc, labels = valid_studies, pos = 3, cex = 0.8)
+
+# Add a legend that labels the two horizontal lines.
+legend("bottomright", 
+       legend = c("Training AUC", "Validation AUC (Mean)"),
+       col = c("blue", "red"),
+       lwd = 2, lty = 2,
+       bty = "n")
+
+
+```
+
+
+
+This could mean study heterogeneity... motivating hierarchical unpooled modeling
+
+# IQR Filtering
+
+```{r}
+XX_all_PCR <- do.call(cbind, XX_pCR)
+
+data_all <- data.frame(t(XX_all_PCR))
+data_all$ZZ <- study_indicator
+
+# Compute IQR for each gene in XX_all_PCR
+gene_iqr <- apply(XX_all_PCR, 1, IQR, na.rm = TRUE)
+
+# Rank the genes by IQR (highest first) and select the top 50 indices
+top50_indices <- order(gene_iqr, decreasing = TRUE)[1:50]
+
+# Get the gene names corresponding to these top 50 genes
+filtered_genes <- rownames(XX_all_PCR)[top50_indices]
+
+# Create a filtered expression matrix with only these 50 genes
+XX_filtered <- XX_all_PCR[top50_indices, ]
+
+# Transpose so that each row is a patient. Then add the ZZ column.
+data_filtered <- data.frame(t(XX_filtered))
+data_filtered$ZZ <- study_indicator
+```
+
+## Retry gene selection within ranked IQR subset
+
+```{r}
+YY_all_PCR <- unlist(pCR)
+
+filtered_genes <- rownames(XX_all_PCR)[top50_indices]
+
+data_filtered <- data.frame(t(XX_filtered))
+colnames(data_filtered) <- filtered_genes  # ensure gene columns are correctly named
+data_filtered$ZZ <- study_indicator
+data_filtered$Y  <- YY_all_PCR
+```
+
+
+### Mas-o-menos
+
+
+```{r}
+study_ids <- sort(unique(data_filtered$ZZ))
+auc_mom <- numeric(length(study_ids))
+
+for (s in study_ids) {
+  # Partition data: training = all studies except s; test = study s.
+  train_data <- subset(data_filtered, ZZ != s)
+  test_data  <- subset(data_filtered, ZZ == s)
+  
+  # Convert outcomes to numeric if necessary.
+  Y_train <- as.numeric(as.character(train_data$Y))
+  Y_test  <- as.numeric(as.character(test_data$Y))
+  
+  # For mas-o-menos, prepare predictor matrices (genes are rows).
+  X_train <- t(as.matrix(train_data[, filtered_genes]))
+  X_test  <- t(as.matrix(test_data[, filtered_genes]))
+  
+  # Check if test data has both outcome classes.
+  if(length(unique(Y_test)) < 2){
+    cat("LOSO Study", s, "test data does not have two outcome classes. Skipping mas-o-menos AUC calculation.\n")
+    auc_mom[s] <- NA
+    next  # Move to the next study.
+  }
+  
+  # Train mas-o-menos on training data using P = 10.
+  mom_model <- masomenos.train(X = X_train, Y = Y_train, P = 10, training.criterion = "AUC")
+  # Test the model on the left-out study.
+  mom_test <- masomenos.test(X = X_test, Y = Y_test, MoM.out = mom_model)
+  
+  # Store the computed criterion/ AUC value.
+  auc_mom[s] <- mom_test$criterion.mom
+  
+  cat("LOSO Study", s, "mas-o-menos AUC:", round(auc_mom[s], 3), "\n")
+}
+
+# Report mean LOSO mas-o-menos AUC (for studies with valid AUCs)
+mean_auc_mom <- mean(auc_mom, na.rm = TRUE)
+cat("Mean LOSO AUC for mas-o-menos:", round(mean_auc_mom, 3), "\n\n")
+```
+
+
+```{r}
+# Define the vector of gene counts to try.
+genes_to_try <- c(2, 5, 10, 20, 30, 40, 50)
+
+auc_values <- numeric(length(genes_to_try))
+
+# Loop over the gene counts.
+for (i in seq_along(genes_to_try)) {
+  P <- genes_to_try[i]
+  
+  # Prepare the expression matrix from data_filtered using the filtered genes.
+  # Note: We transpose so that each row corresponds to a gene and each column to a patient.
+  X_mat <- t(as.matrix(data_filtered[, filtered_genes]))
+  
+  # Use the outcome from data_filtered$Y.
+  # (If Y is a factor, convert it to numeric as needed.)
+  Y_vec <- as.numeric(as.character(data_filtered$Y))
+  
+  # Run the mas-o-menos training procedure using the filtered data.
+  # P here sets the number of genes (from the filtered 50) to use.
+  mom_out <- masomenos.train(X = X_mat, Y = Y_vec, P = P, training.criterion = "AUC")
+  
+  # Store the computed AUC in the vector.
+  auc_values[i] <- mom_out$criterion.mom
+  
+  # Print progress.
+  cat("For", P, "genes, training AUC:", round(auc_values[i], 3), "\n")
+}
+
+# Plot the AUC versus the number of genes.
+plot(genes_to_try, auc_values, type = "b",
+     xlab = "Number of Genes",
+     ylab = "Training AUC",
+     main = "mas-o-menos Criterion (AUC) vs. Number of Genes",
+     pch = 19, col = "blue")
+```
+
+
+
+```{r}
+mom_pcr_all <- masomenos.train(X = t(as.matrix(data_filtered[, filtered_genes])),
+                               Y = as.numeric(as.character(data_filtered$Y)),
+                               P = 10,
+                               training.criterion = "AUC")
+
+# Retrieve the selected gene indices (relative to the set of filtered genes).
+selected_genes <- mom_pcr_all$variables
+cat("The top 10 most discriminatory genes (by row indices) are:\n")
+print(selected_genes)
+
+# select the top genes using the indices from masomenos.train.
+selected_gene_names_allstudies <- filtered_genes[selected_genes]
+cat("The top 10 most discriminatory gene names are:\n")
+print(selected_gene_names_allstudies)
+```
+```{r}
+# Set up a 2 x 5 plotting area.
+par(mfrow = c(2, 5), mar = c(4, 4, 3, 1))
+
+# Loop over each selected gene and produce a density plot.
+for (gene in selected_gene_names_allstudies) {
+  
+  # Extract the gene expression values from data_filtered.
+  # data_filtered contains columns with gene expression (names = filtered_genes).
+  gene_expr <- as.numeric(data_filtered[[gene]])
+  
+  # Split the expression values by outcome (assumed coded as 0/1).
+  expr_0 <- gene_expr[ data_filtered$Y == 0 ]
+  expr_1 <- gene_expr[ data_filtered$Y == 1 ]
+  
+  # Remove missing values.
+  expr_0 <- expr_0[ !is.na(expr_0) ]
+  expr_1 <- expr_1[ !is.na(expr_1) ]
+  
+  # Check that each group has at least two observations.
+  if (length(expr_0) < 2 || length(expr_1) < 2) {
+    cat("Gene", gene, "does not have enough non-missing values for both outcomes. Skipping plot.\n")
+    next
+  }
+  
+  # Compute density estimates for each outcome group.
+  density_0 <- density(expr_0)
+  density_1 <- density(expr_1)
+  
+  # Determine common x and y limits for the plot.
+  xlim_range <- range(c(density_0$x, density_1$x))
+  ylim_range <- range(c(density_0$y, density_1$y))
+  
+  # Plot the density for pCR = 0 (blue).
+  plot(density_0, xlim = xlim_range, ylim = ylim_range,
+       main = paste("Gene:", gene),
+       xlab = "Expression", ylab = "Density",
+       col = "blue", lwd = 2)
+  # Overlay the density for pCR = 1 (red).
+  lines(density_1, col = "red", lwd = 2)
+  
+  # Add a legend to the plot.
+  legend("topright", legend = c("pCR = 0", "pCR = 1"),
+         col = c("blue", "red"), lwd = 2, bty = "n")
+}
+
+```
+
+## Pooled Logistic Regression Model:IQR subset
+```{r}
+X_data <- t(XX_all_pCR[filtered_genes, ])
+
+data_lr <- data.frame(X_data)
+data_lr$pCR <- factor(YY_all_pCR)  # factors with levels "0" and "1"
+
+model_logistic_IQR <- glm(pCR ~ ., data = data_lr, family = binomial, na.action = na.exclude)
+
+summary(model_logistic_IQR)
+
+# Calculate predicted probabilities from the logistic regression model.
+pred_probs <- predict(model_logistic_IQR, type = "response")
+
+# Compute the AUC using the pROC package.
+roc_obj <- roc(response = data_lr$pCR, predictor = pred_probs)
+auc_value <- auc(roc_obj)
+
+# Print the AUC value
+cat("The AUC for the logistic regression model using the 50 selected genes is:", round(auc_value, 3), "\n")
+```
+```{r}
+library(pROC)
+
+study_numbers <- unique(data_filtered$ZZ)
+auc_values_glm <- numeric(length(study_numbers))
+auc_values_glm[] <- NA  # preallocate as NA
+
+for (i in seq_along(study_numbers)) {
+  test_study <- study_numbers[i]
+  
+  # Partition data: training is all studies except the current one; testing is the left-out study.
+  train_data <- subset(data_filtered, ZZ != test_study)
+  test_data  <- subset(data_filtered, ZZ == test_study)
+  
+  # Fit logistic regression on the training set.
+  model_glm <- glm(Y ~ ., data = train_data[, c(filtered_genes, "Y")],
+                   family = binomial)
+  
+  # Predict on the test set.
+  preds <- predict(model_glm, newdata = test_data, type = "response")
+  
+  # Check if test_data has both outcome classes.
+  if(length(unique(test_data$Y)) < 2){
+    cat("Left-out Study", test_study, "does not have two outcome classes. Skipping AUC calculation.\n")
+    next  # Skip this iteration.
+  }
+  
+  # Calculate the AUC using the pROC package.
+  roc_obj <- roc(response = test_data$Y, predictor = preds)
+  auc_values_glm[i] <- auc(roc_obj)
+  
+  cat("Left-out Study", test_study, "AUC:", round(auc_values_glm[i], 3), "\n")
+}
+
+# Optionally, compute mean AUC across studies that produced a valid AUC
+mean_auc_glm <- mean(auc_values_glm, na.rm = TRUE)
+cat("Mean LOSO AUC (glm):", round(mean_auc_glm, 3), "\n")
+
+```
+
+```{r}
+valid_indices <- !is.na(auc_values_glm)
+valid_studies <- study_numbers[valid_indices]
+valid_auc <- auc_values_glm[valid_indices]
+
+plot(valid_studies, valid_auc, 
+     pch = 16, col = "blue",
+     xlab = "Study Number", 
+     ylab = "Validation AUC",
+     main = "LOSO IQR(P=50) Validation AUC by Study",
+     ylim = c(min(valid_auc) - 0.05, max(valid_auc) + 0.05))
+
+# Add horizontal lines:
+abline(h = mean_auc_glm, col = "red", lwd = 2, lty = 2)   # Mean Validation AUC
+abline(h = 0.781, col = "blue", lwd = 2, lty = 2)          # Training AUC (0.684)
+
+text(valid_studies, valid_auc, labels = valid_studies, pos = 3, cex = 0.8)
+
+legend("bottomright", 
+       legend = c("Training AUC", "Validation AUC (Mean)"),
+       col = c("blue", "red"),
+       lwd = 2, lty = 2,
+       bty = "n")
+
+
+```
+
+
+
+## Pooled Logistic Regression Model:IQR subset, masomenos top 10
+
+```{r}
+X_data <- t(XX_all_pCR[selected_gene_names_allstudies, ])
+
+data_lr <- data.frame(X_data)
+data_lr$pCR <- factor(YY_all_pCR)  # factors with levels "0" and "1"
+
+# Fit a logistic regression model using all 10 gene expressions as predictors.
+model_logistic_IQR_mom <- glm(pCR ~ ., data = data_lr, family = binomial, na.action = na.exclude)
+
+summary(model_logistic_IQR_mom)
+
+pred_probs <- predict(model_logistic_IQR_mom, type = "response")
+
+roc_obj <- roc(response = data_lr$pCR, predictor = pred_probs)
+auc_value <- auc(roc_obj)
+
+cat("The AUC for the logistic regression model using the 10 selected genes is:", round(auc_value, 3), "\n")
+```
+
+
+
+# Unpooled logistic model
+
+![parameters](C:/Users/khcod/OneDrive/Pictures/Screenshots/Screenshot 2025-04-23 123433.png)
+![logits](C:/Users/khcod/OneDrive/Pictures/Screenshots/Screenshot 2025-04-23 123924.png)
+
+$$
+\alpha_j \sim \mathcal{N}\left(\mu_\alpha, \tau_\alpha^{-1}\right), \quad j = 1, \dots, J
+$$
+
+$$
+\beta_{j,k} \sim \mathcal{N}\left(\mu_{\beta,k}, \tau_{\beta,k}^{-1}\right), \quad j = 1,\dots, J,\quad k = 1,\dots, K
+$$
+
+$$
+\mu_\alpha \sim \mathcal{N}(0,\, 0.01), \quad \tau_\alpha \sim \operatorname{Gamma}(0.01,\, 0.01)
+$$
+
+$$
+\mu_{\beta,k} \sim \mathcal{N}(0,\, 0.01), \quad k = 1,\dots, K
+$$
+
+$$
+\tau_{\beta,k} = \left(\tau_{\text{int},k} \times 0.01\right)^2, \quad \tau_{\text{int},k} \sim \operatorname{Discrete}(\mathbf{p})
+$$
+
+
+```{r}
+N <- nrow(data_hier)                    # number of patients
+K <- 10                                 # number of genes/predictors
+N_studies <- length(unique(data_hier$ZZ))  # number of studies
+
+model_string <- "
+model {
+  for (i in 1:N) {
+    Y[i] ~ dbern(p[i])
+    logit(p[i]) <- alpha[ZZ[i]] + inprod(beta[ZZ[i], 1:K], X[i,])
+  }
+  
+  for (j in 1:N_studies) {
+    alpha[j] ~ dnorm(mu_alpha, tau_alpha)
+    for (k in 1:K) {
+      beta[j,k] ~ dnorm(mu_beta[k], precision_tau[k])
+    }
+  }
+  
+  # Hyperpriors for the intercepts.
+  mu_alpha ~ dnorm(0.0, 0.01)
+  tau_alpha ~ dgamma(0.01, 0.01)
+  
+  # Hyperpriors for the slopes.
+  for (k in 1:K) {
+    mu_beta[k] ~ dnorm(0.0, 0.01)
+    # Discrete prior for tau: tau_int_prior is provided as data; for example, a vector of length 25.
+    tau_int[k] ~ dcat(tau_int_prior[])
+    tau[k] <- tau_int[k] * 0.01
+    precision_tau[k] <- 1 / (tau[k] * tau[k])
+  }
+}
+"
+
+data_jags <- list(
+  N = N,
+  K = K,
+  N_studies = N_studies,
+  Y = as.numeric(as.character(data_hier$Y)),   # ensure Y is numeric 0/1
+  X = as.matrix(X_data),  # predictors matrix (N x K)
+  ZZ = data_hier$ZZ,                             # study indicator for each patient
+  tau_int_prior = rep(0.03, 25)                   # discrete prior vector for tau.int (length 25)
+)
+
+# Initialize 3 chains, run a burn-in, then sample posterior draws.
+model <- jags.model(textConnection(model_string), data = data_jags, n.chains = 3, n.adapt = 1000)
+update(model, 1000)  # burn-in period
+samples <- coda.samples(model,
+                        variable.names = c("alpha", "beta", "mu_beta", "tau", "precision_tau"),
+                        n.iter = 5000)
+
+# Print the summary of posterior samples.
+#print(summary(samples))
+```
+## Compute AUC
+
+```{r}
+# take posterior mean for each param
+post_summary <- summary(samples)$statistics
+# alpha[1], …, alpha[J] are rows; beta[j,1], …, beta[j,K] are rows
+alpha_hat <- post_summary[paste0("alpha[", 1:N_studies, "]"), "Mean"]
+beta_hat  <- matrix(
+  post_summary[grep("^beta\\[", rownames(post_summary)), "Mean"],
+  nrow = N_studies, byrow = TRUE
+)
+
+linear_preds <- numeric(N)
+for(i in 1:N){
+  j <- data_hier$ZZ[i]
+  x_i <- X_data[i, ]
+  linear_preds[i] <- alpha_hat[j] + sum(beta_hat[j, ] * x_i)
+}
+p_hat <- plogis(linear_preds)
+
+roc_train <- roc(response = data_hier$Y, predictor = p_hat)
+auc_train <- auc(roc_train)
+cat("Train AUC =", round(auc_train,3), "\n")
+```
+
+## Attempt 2: pooled intercept
+
+```{r}
+model_string_pooled_int <- "
+model {
+  for (i in 1:N) {
+    Y[i] ~ dbern(p[i])
+    logit(p[i]) <- alpha + inprod(beta[ZZ[i],], X[i,])
+  }
+
+  # One global intercept
+  alpha ~ dnorm(0.0, 0.01)
+
+  # Study-specific slopes
+  for (j in 1:N_studies) {
+    for (k in 1:K) {
+      beta[j,k] ~ dnorm(mu_beta[k], precision_tau[k])
+    }
+  }
+
+  # Hyperpriors for slopes
+  for (k in 1:K) {
+    mu_beta[k] ~ dnorm(0.0, 0.01)
+    tau_int[k] ~ dcat(tau_int_prior[])
+    tau[k] <- tau_int[k] * 0.01
+    precision_tau[k] <- 1 / (tau[k]^2)
+  }
+}
+"
+
+# 3. Prepare data for JAGS
+data_jags <- list(
+  N = N,
+  K = K,
+  N_studies = N_studies,
+  Y = as.numeric(as.character(data_hier$Y)),   # ensure Y is numeric 0/1
+  X = as.matrix(X_data),  # predictors matrix (N x K)
+  ZZ = data_hier$ZZ,                             # study indicator for each patient
+  tau_int_prior = rep(0.03, 25)                   # discrete prior vector for tau.int (length 25)
+)
+
+# 4. Initialize and run the JAGS model
+# Initialize 3 chains, run a burn-in, then sample posterior draws.
+model <- jags.model(textConnection(model_string_pooled_int), data = data_jags, n.chains = 3, n.adapt = 1000)
+update(model, 1000)  # burn-in period
+samples <- coda.samples(model,
+                        variable.names = c("alpha", "beta", "mu_beta", "tau", "precision_tau"),
+                        n.iter = 5000)
+
+# Print the summary of posterior samples.
+#print(summary(samples))
+```
+
+## Compute AUC
+
+```{r}
+# take posterior mean for each param
+post_summary <- summary(samples)$statistics
+beta_hat  <- matrix(
+  post_summary[grep("^beta\\[", rownames(post_summary)), "Mean"],
+  nrow = N_studies, byrow = TRUE
+)
+
+alpha_hat <- post_summary["alpha", "Mean"]
+
+linear_preds <- numeric(N)
+for(i in 1:N){
+  j <- data_hier$ZZ[i]
+  x_i <- X_data[i, ]
+  linear_preds[i] <- alpha_hat + sum(beta_hat[j, ] * x_i)
+}
+p_hat <- plogis(linear_preds)
+
+roc_train <- roc(response = data_hier$Y, predictor = p_hat)
+auc_train <- auc(roc_train)
+cat("Train AUC =", round(auc_train,3), "\n")
+```
+
+## Leave-One-Study-Out Validation
+
+```{r}
+coef_table <- summary(model_logistic_IQR)$coefficients
+sig_genes <- rownames(coef_table)[
+  coef_table[, "Pr(>|z|)"] < 0.05 &
+  rownames(coef_table) != "(Intercept)"
+]
+cat("Significant genes (p < 0.05):\n")
+print(sig_genes)
+
+data_loso <- data_filtered
+
+study_numbers <- sort(unique(data_loso$ZZ))
+auc_sig <- rep(NA_real_, length(study_numbers))
+
+for (i in seq_along(study_numbers)) {
+  s <- study_numbers[i]
+  train <- subset(data_loso, ZZ != s)
+  test  <- subset(data_loso, ZZ == s)
+  
+  # skip if the test set has only one class
+  if (length(unique(test$Y)) < 2) {
+    message("Skipping study ", s, ": only one outcome class")
+    next
+  }
+  
+  # build formula dynamically
+  fml_sig <- as.formula(paste("Y ~", paste(sig_genes, collapse = " + ")))
+  
+  # fit on train
+  mod_sig <- glm(fml_sig, data = train, family = binomial)
+  
+  # predict & AUC on test
+  preds_sig <- predict(mod_sig, newdata = test, type = "response")
+  roc_obj   <- roc(response = test$Y, predictor = preds_sig)
+  auc_sig[i] <- auc(roc_obj)
+  
+  cat("Study", s, "LOSO AUC =", round(auc_sig[i], 3), "\n")
+}
+
+#average over studies with valid AUC
+mean_auc_sig <- mean(auc_sig, na.rm = TRUE)
+cat("Mean LOSO AUC (significant genes):", round(mean_auc_sig, 3), "\n")
+```
+The validation AUC improved by removing insignificant genes. Could removing less generalizable studies from validation provide better generalizability?
+
+
+```{r}
+data_loso <- data_filtered
+
+# run LOSO again on the *significant* genes , excluding studies with AUC ≤ 0.6
+study_numbers <- sort(unique(data_loso$ZZ))
+auc_sig <- rep(NA_real_, length(study_numbers))
+
+for (i in seq_along(study_numbers)) {
+  s <- study_numbers[i]
+  train <- subset(data_loso, ZZ != s)
+  test  <- subset(data_loso, ZZ == s)
+  
+  # skip if the test set has only one class
+  if (length(unique(test$Y)) < 2) {
+    message("Skipping study ", s, ": only one outcome class")
+    next
+  }
+  
+  # fit model on train
+  fml_sig <- as.formula(paste("Y ~", paste(sig_genes, collapse = " + ")))
+  mod_sig <- glm(fml_sig, data = train, family = binomial)
+  
+  # predict & compute AUC on test
+  preds_sig <- predict(mod_sig, newdata = test, type = "response")
+  roc_obj   <- roc(response = test$Y, predictor = preds_sig)
+  auc_val   <- auc(roc_obj)
+  
+  # exclude if AUC ≤ 0.6
+  if (auc_val <= 0.6) {
+    message("Excluding study ", s, ": LOSO AUC = ", round(auc_val, 3), " ≤ 0.6")
+    next
+  }
+  
+  auc_sig[i] <- auc_val
+  cat("Study", s, "LOSO AUC =", round(auc_val, 3), "\n")
+}
+
+# average over the retained studies
+valid_auc <- na.omit(auc_sig)
+mean_auc_sig <- mean(valid_auc)
+cat("Mean LOSO AUC (significant genes, excluding IQR P=50 validation AUC ≤ 0.6):", round(mean_auc_sig, 3), "\n")
+```
+
+
+
+## Motivation Behind Classifier Choice
+
+The original classifier choice was mas-o-menos due to the univariate gene selection method used in homework 4 that in general outperformed k-TSP. In addition, considering only pairwise comparisons of a highly dimensional dataset likely would provide far too many comparisons for k-TSP as an initial gene selection method. After observing other students' ideas in class, Alyssa pointed out that filtering genes by IQR could select for genes with only variability in X. As follows, mas-o-menos could be used as an additional gene selection method focusing on the response variable and discrimination ability for given genes and the binary Y. 
+
+For the model, a linear decision boundary given logistic regression is an appropriate choice for this binary classification problem as shown in Project 2. In addition, a pooled logistic regression model for P=50 and P=10 predictors displayed near-threshold AUC without accounting for study specific effects. Given the EDA and the clear multimodal distribution of gene expression corresponsing to different studies and Michael's PCA analysis showing clear clustering of different studies in reduced space, an unpooled logistic regression with varying slopes and/or means could account for the study-wide heterogeneity. 
+
+## Motivation behind choice of training and testing studies
+
+For the training and testing studies, I chose to use Leave-One-Study-Out evaluation due to both the study batch effects and the variation in the plots of "LOSO IQR(P=50) Validation AUC by Study". However, LOSO validation led to problems in this dataset. Firstly, the response variable in the validation set had only one class, 1 or 0 in this binary classification problem, which led to studies 9 and 11 being omitted from the validation set list. Additionally, both the total number of samples and the number of samples in each class in the remaining studies in the validation set list is imbalanced, leading to drastic differences in testing AUC based on the validation study of that iteration. 
+To account for this, the final validation did not include studies below a classifier imbalance and an AUC threshold similar to the threshold of 110 samples for Leave-One-In cross validation exhibited in Trippa et al. 2015.
+
+
+
+
+
+
+## Discussion 
+
+The first unpooled logistic regression model clearly overfit likely due to too many parameter estimations causing overfitting on batch-specific effects. As follows, I went against my original hypothesis and tested another jags model which only varied study-wise intercepts instead of intercepts and slopes. Nonetheless, both models struggled to generalize to validation set(s). I am curious whether other students had success with hierarchical models. Specifically, some students like Michael used clustering to reduce the number of dimensions and thus parameter estimates from 18 to 6 or fewer, preserving batch-specific effects by grouping studies with similar gene expression patterns.
+
+Countering my original hypothesis, using mas-o-menos to select genes for subsequent logistic regression reduced AUC. This is likely due to the univariate nature of mas-o-menos. That is, mas-o-menos does not consider interactions between variables and may have selected genes with high collinearity that performed poorly when interacting in logistic regression. Noticing this pattern, I chose to remove genes based on performance within logistic regression instead of a separate mas-o-menos classifier as originally planned based on p-value to account for collinearity concerns. 
+
+Some cons of the final pooled modeling approach include dropping validation studies that provided poor discrimination. For instance, if an inference population resembles study 17, which was dropped for poor AUC validation on the IQR filtered dataset with P=50, the model would likely generalize poorly. In addition, the LOSO approach to this dataset had limitations due to studies 9 and 11 having small sample sizes and only 1 class, making it impossible to use studies 9 and 11 as viable validation sets without data imputation to address class imbalance. Additionally, according to Patil & Parmigiani 2018, ensemble methods across meta-analyses may improve results for metadata like these with study heterogeneity, which were not considered in this analysis
+
+Some pros of the final pooled modeling approach include simplicity and interpretability from filtering only by IQR range on X and following significant predictor selection based on p-value with a logistic regression of P=50. The approach leverages both selection of high gene expression variability in X and the likelihood of response discrimination in Y to reduce the subset of predictors. As follows, the pooled model can generalize well to any inference population that was not dropped from the validation set. In addition, using different studies / hospitals as folds often penalizes model performance more and offers an effective approach to quantify model generalizability (Schmid et al., 2021). To conclude, based on the findings from Bernau et al. 2014, the final pooled logistic regression generalizes well to most studies in the validation set, suggesting that dropped studies had a different and less common patient profile. 
+
+# Bibliography
+
+Bernau C. et al. (2014). “Cross-study validation for the assessment of prediction algorithms.” Bioinformatics 30(12):i105-i112. DOI: 10.1093/bioinformatics/btu279
+
+Lorenzo Trippa. Levi Waldron. Curtis Huttenhower. Giovanni Parmigiani. "Bayesian nonparametric cross-study validation of prediction methods." Ann. Appl. Stat. 9 (1) 402 - 428, March 2015. https://doi.org/10.1214/14-AOAS798
+
+OpenAI. (2025). ChatGPT (model 04-mini-high) [Large language model]. Retrieved from https://chat.openai.com/
+Note. Used for code writing, debugging, and rendering issues. LLM's did not assist in writing any text outside of code chunks.
+
+Patil P. & Parmigiani G. (2018). “Training replicable predictors in multiple studies.” PNAS 115(11):2578-2583. DOI: 10.1073/pnas.1708283115. 
+
+Schmid CH. et al. (2021). “Internal-external cross-validation helped to evaluate the generalizability of prediction models in large clustered datasets.” J. Clin. Epidemiol. 137:83-91. DOI: 10.1016/j.jclinepi.2021.03.020.
